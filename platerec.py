@@ -1,150 +1,62 @@
-import cv2
-import numpy as np
+import urllib
 import os
-import imutils
-import collections
 from matplotlib import pyplot as plt
-import glob
-from transform import four_point_transform
+from transform import *
+from plates import Plates
 
-class Plates:
-    STD_HEIGHT = 200
+# from conf import *
+# url = 'https://4g92mivec.files.wordpress.com/2014/08/plat-nomor.jpg'
+url = 'https://upload.wikimedia.org/wikipedia/commons/a/a5/Plat_Nomor_Nganjuk_%283_Huruf%29.jpg'
+# url = 'https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9GcST8y8Nr_bXfsU9jtcKh9EbVuZL1gLtBB1agjN0aVjnQ9RtBi7L&usqp=CAU'
+# url = 'https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9GcQObLn-Fniq1pj-iQcRicyeHV88FNPap62AA8Q2l6hh_t7rmyBQ&usqp=CAU'
+# url = 'https://github.com/keynekassapa13/num-plate-track/blob/master/numberplates/car18.jpg?raw=true'
 
-    def __init__(self, img_ori, img_name):
-        self.img_ori = self.preprocess(img_ori)
-        self.result = self.img_ori.copy()
-        self.img_name = img_name
-        self.img = cv2.cvtColor(self.img_ori, cv2.COLOR_BGR2GRAY)
 
-        self.img_process()
-        self.contour()
-        self.show_plt()
+def resize_img(ori_img, new_height):
+  height, width, _ = ori_img.shape
+  new_width = int(width * float(new_height) / float(height))
 
-    def preprocess(self, img_ori):
-        self.height = img_ori.shape[0]
-        self.width = img_ori.shape[1]
+  new_img = cv2.resize(ori_img, (new_width, new_height))
+  return new_img
 
-        # Resize image
-        self.width = int(self.STD_HEIGHT / self.height * self.width)
-        self.height = self.STD_HEIGHT
-        img = cv2.resize(img_ori, (self.width, self.height))
-        return img
 
-    def img_process(self):
-        # Threshold
-        _, mask = cv2.threshold(self.img, thresh=200, maxval=255, type=cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+pts = []
+image = None
 
-        self.res_img = mask
 
-        # Morphological Transformation
-        kernel = np.ones((3, 3), np.uint8)
-        # self.res_img = cv2.erode(self.res_img, kernel=kernel, iterations=1)
-        # self.res_img = cv2.dilate(self.res_img, kernel=kernel, iterations=1)
-        # self.res_img = cv2.dilate(self.res_img, kernel=kernel, iterations=1)
-        # self.res_img = cv2.erode(self.res_img, kernel=kernel, iterations=1)
+def click_and_crop(event, x, y, flags, param):
+    global pts, image
+    if event == cv2.EVENT_LBUTTONDOWN and len(pts) < 4:
+        p = (x,y)
+        pts.append(p)
+        image = cv2.circle(image, p, 3, (255,0,0), 2) 
 
-        self.edges = cv2.Canny(self.res_img, self.height, self.width)
+def select_plat_area(img):
+    global image
+    image = img.copy()
+    cv2.imshow('Pilih area plat nomor', image)
+    cv2.setMouseCallback("Pilih area plat nomor", click_and_crop)
 
-    def contour(self):
-        # Contours
-        contours, _ = cv2.findContours(
-            self.res_img,
-            cv2.RETR_TREE,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+    while True:
+        cv2.imshow("Pilih area plat nomor", image)
+        key = cv2.waitKey(1) & 0xFF
+        # if the 'c' key is pressed, break from the loop
+        if key == ord("c") and len(pts)==4:
+            break
+        elif key == ord('r'): # reset
+            image = img.copy()
+            pts.clear()
+    cv2.destroyAllWindows()
 
-        NumberPlateCnt = None
-        found = False
-        lt, rb = [10000, 10000], [0, 0]
+    plat_img = four_point_transform(img, np.array(pts))
+    return plat_img
 
-        # Calculate polygonal curve, see if it has 4 curve
-        for c in contours:
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.06 * peri, True)
-            if len(approx) == 4:
-                found = True
-                NumberPlateCnt = approx
-                break
-        if found:
-            cv2.drawContours(self.result, [NumberPlateCnt], -1, (255, 0, 255), 2)
-
-            for point in NumberPlateCnt:
-                cur_cx, cur_cy = point[0][0], point[0][1]
-                if cur_cx < lt[0]: lt[0] = cur_cx
-                if cur_cx > rb[0]: rb[0] = cur_cx
-                if cur_cy < lt[1]: lt[1] = cur_cy
-                if cur_cy > rb[1]: rb[1] = cur_cy
-
-            cv2.circle(self.result, (lt[0], lt[1]), 2, (150, 200, 255), 2)
-            cv2.circle(self.result, (rb[0], rb[1]), 2, (150, 200, 255), 2)
-
-            self.crop = self.res_img[lt[1]:rb[1], lt[0]:rb[0]]
-            self.crop_res = self.img_ori[lt[1]:rb[1], lt[0]:rb[0]]
-
-    def pattern_matching(self):
-        self.pm = {}
-
-        method = cv2.TM_CCOEFF_NORMED
-        threshold = self.pm_thresh
-        cw, ch = self.crop.shape[::-1]
-
-        # cv2.imshow("crop", self.crop)
-
-        for temp in self.temp_num:
-            highest = 0
-            highest_pt = []
-            for i in range(1, 4):
-                temp_result = []
-                t_img = cv2.imread("./temp-num/{}-0{}.png".format(temp, str(i)), 0)
-                t_img = imutils.resize(t_img, height=ch - 2)
-                w, h = t_img.shape[::-1]
-
-                res = cv2.matchTemplate(self.crop, t_img, method)
-                loc = np.where(res >= threshold)
-                for pt in zip(*loc[::-1]):
-                    temp_result.append(pt)
-                    cv2.rectangle(self.crop_res, pt, (pt[0] + w, pt[1] + h), (0, 255, 255), 1)
-                if len(temp_result) > highest:
-                    highest = len(temp_result)
-                    highest_pt = temp_result
-
-            for pt in highest_pt:
-                cv2.rectangle(self.crop_res, pt, (pt[0] + w, pt[1] + h), (0, 255, 255), 1)
-                self.pm[pt[0]] = temp
-
-        self.pm = collections.OrderedDict(sorted(self.pm.items()))
-        self.pm_result = ''
-        for _, pm in self.pm.items():
-            self.pm_result += pm
-
-        print("::::::RESULT = {}\n".format(self.pm_result))
-        return
-
-    def show_plt(self):
-        '''
-        Showing 6 main step of the process for turning original frame to the result frame
-        '''
-        title = [
-            'Black and White',
-            'Threshold',
-            'Canny',
-            'Num Plate Detected',
-            'Num Plate Cropped',
-            'Predicted Num :\n'#+ self.pm_result
-        ]
-        result = [self.img, self.res_img, self.edges, self.result[:, :, ::-1], self.crop, self.crop_res]
-        num = [231, 232, 233, 234, 235, 236]
-
-        for i in range(len(result)):
-            plt.subplot(num[i]),plt.imshow(result[i], cmap = 'gray')
-            plt.title(title[i]), plt.xticks([]), plt.yticks([])
-
-        plt.suptitle(self.img_name)
-        plt.show()
-
-if __name__ == '__main__':
-    files = glob.glob('plat/*')
-    for f in files:
-        ori_img = cv2.imread(f)
-        Plates(ori_img, f)
+temp_num = [f for f in os.listdir('./temp-num') if os.path.isfile(os.path.join('./temp-num', f))]
+plt.rcParams["figure.figsize"] = (15,10)
+resp = urllib.request.urlopen(url)
+image = np.asarray(bytearray(resp.read()), dtype="uint8")
+ori_img = cv2.imdecode(image, cv2.IMREAD_COLOR)
+ori_img = resize_img(ori_img=ori_img, new_height=480)
+plat_img = select_plat_area(ori_img)
+plat_img = resize_img(plat_img, 100)
+old = Plates(plat_img, 'Car1', 0.5, temp_num)
